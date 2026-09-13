@@ -1,0 +1,21 @@
+<main>
+  <h1>SplitGuard · 训练/评测拆分审计</h1>
+
+  <section class="picker">
+    <label>新数据集名 <input [(ngModel)]="datasetName"></label>
+    <button (click)="createDataset()">创建</button>
+    <span>或</span>
+    <label>已有数据集 ID <input type="number" [(ngModel)]="datasetIdInput"></label>
+    <button (click)="useExisting()">加载</button>
+  </section>
+
+  @if (datasetId(); as id) {
+    @if (groups(); as g) {
+      <app-group-board [data]="g" />
+      <hr>
+      <app-split-panel [datasetId]="id" />
+    } @else {
+      <p>加载分组中…（若长期无响应，请确认数据集存在且已导入样本）</p>
+    }
+  }
+</main>
