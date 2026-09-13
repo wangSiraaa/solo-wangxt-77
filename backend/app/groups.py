@@ -50,27 +50,42 @@ def build_groups(samples: pd.DataFrame, relations: pd.DataFrame) -> GroupTable:
     for sid in samples["source_id"].dropna():
         uf.find(f"source:{int(sid)}")
 
-    # Anchor samples to their declared sources.
+    # Phase 1: anchor samples to their DECLARED sources only. Afterwards each
+    # component holds at most one source node — remember it as the anchor.
     for row in samples.itertuples():
         if pd.notna(row.source_id):
             uf.union(f"sample:{row.id}", f"source:{int(row.source_id)}")
-
-    # Derived samples inherit identity along relation edges.
-    for rel in relations.itertuples():
-        uf.union(f"sample:{rel.parent_sample_id}", f"sample:{rel.child_sample_id}")
-
-    # Detect conflicts: a sample whose declared source disagrees with the
-    # identity it inherits through derivation edges.
-    conflicts = []
+    anchor_of: dict[str, int] = {}
     for row in samples.itertuples():
         if pd.notna(row.source_id):
-            if uf.find(f"sample:{row.id}") != uf.find(f"source:{int(row.source_id)}"):
-                conflicts.append({
-                    "sample_id": row.id,
-                    "declared_source_id": int(row.source_id),
-                    "inherited_group": uf.find(f"sample:{row.id}"),
-                    "reason": "declared source conflicts with identity inherited via derivation chain",
-                })
+            anchor_of[uf.find(f"sample:{row.id}")] = int(row.source_id)
+
+    # Phase 2: inherit identity along relation edges. BEFORE merging, check
+    # whether the edge joins two components anchored to DIFFERENT declared
+    # sources — that is a declared-vs-inherited conflict. Detecting it here,
+    # pre-merge, is the only reliable point: after the union both sides share
+    # one root and the disagreement is invisible. We still merge (conservative:
+    # the whole component stays on one side), but the conflict is reported.
+    conflicts = []
+    for rel in relations.itertuples():
+        p, c = f"sample:{rel.parent_sample_id}", f"sample:{rel.child_sample_id}"
+        rp, rc = uf.find(p), uf.find(c)
+        if rp == rc:
+            continue
+        sp, sc = anchor_of.get(rp), anchor_of.get(rc)
+        if sp is not None and sc is not None and sp != sc:
+            conflicts.append({
+                "parent_sample_id": int(rel.parent_sample_id),
+                "child_sample_id": int(rel.child_sample_id),
+                "declared_source_id": sc,
+                "inherited_source_id": sp,
+                "reason": "declared source conflicts with identity inherited "
+                          "via derivation chain",
+            })
+        uf.union(p, c)
+        merged = sp if sp is not None else sc
+        if merged is not None:
+            anchor_of[uf.find(p)] = merged
 
     # Assign stable group ids.
     roots = sorted({uf.find(f"sample:{sid}") for sid in samples["id"]})

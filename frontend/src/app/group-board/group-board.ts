@@ -12,6 +12,13 @@ import { GroupsResponse } from '../models';
     @if (data()!.conflicts.length) {
       <div class="banner conflict">
         ⚠ {{ data()!.conflicts.length }} 个身份冲突：声明来源与派生链继承身份不一致，需先解决
+        @for (c of data()!.conflicts; track c.child_sample_id) {
+          <div class="conflict-row">
+            样本 #{{ c.child_sample_id }} 声明来源 #{{ c.declared_source_id }}，
+            但沿派生链继承自样本 #{{ c.parent_sample_id }} 的来源 #{{ c.inherited_source_id }}
+            — 已保守合并为一组（不会拆到两侧），请人工裁决
+          </div>
+        }
       </div>
     }
     @if (data()!.orphans.length) {
@@ -51,6 +58,7 @@ import { GroupsResponse } from '../models';
   styles: [`
     .banner { padding: 8px 12px; border-radius: 6px; margin: 8px 0; }
     .banner.conflict { background: #fdecea; color: #b71c1c; }
+    .conflict-row { font-size: 12px; margin-top: 4px; color: #7f0000; }
     .banner.warn { background: #fff8e1; color: #8d6e00; }
     .groups { display: flex; flex-wrap: wrap; gap: 12px; }
     .group-card { border: 1px solid #ddd; border-radius: 8px; padding: 10px; min-width: 320px; }

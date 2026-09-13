@@ -9,8 +9,8 @@ export interface GroupView {
 }
 
 export interface IdentityConflict {
-  sample_id: number; declared_source_id: number;
-  inherited_group: string; reason: string;
+  parent_sample_id: number; child_sample_id: number;
+  declared_source_id: number; inherited_source_id: number; reason: string;
 }
 
 export interface GroupsResponse {

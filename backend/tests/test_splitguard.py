@@ -137,6 +137,59 @@ def test_lock_and_revision_versioning(rich_dataset):
     assert new_locked["manifest_hash"] != locked["manifest_hash"]
 
 
+def test_conflicting_derived_sample_detected_and_isolated():
+    """Derived sample declares source B but is a crop of source A's raw image:
+    conflict must surface, and the merged component must stay on ONE side."""
+    import uuid
+    ds = _mk_dataset(f"conflict-{uuid.uuid4().hex[:8]}")
+    _add_samples(ds, [
+        _raw("ann-1", "genuine", "2026-01-05", "subject:ann"),
+        _raw("ann-2", "genuine", "2026-01-06", "subject:ann"),
+        _raw("ben-1", "genuine", "2026-01-07", "subject:ben"),
+        # crop of ann-1 but mislabeled with ben's identity
+        {"sample_key": "bad-crop", "label": "genuine",
+         "captured_at": "2026-01-08T00:00:00Z", "kind": "crop",
+         "source_key": "subject:ben"},
+        # grandchild with no declared source: inherits through the chain
+        {"sample_key": "bad-crop-aug", "label": "genuine",
+         "captured_at": "2026-01-09T00:00:00Z", "kind": "augment",
+         "source_key": None},
+        _raw("cara-1", "genuine", "2026-02-10", "subject:cara"),
+        _raw("cara-2", "genuine", "2026-02-11", "subject:cara"),
+        _raw("eli-1", "genuine", "2026-03-01", "subject:eli"),
+        _raw("eli-2", "genuine", "2026-03-02", "subject:eli"),
+    ])
+    client.post(f"/datasets/{ds}/relations", json=[
+        {"parent_sample_key": "ann-1", "child_sample_key": "bad-crop",
+         "relation_type": "crop"},
+        {"parent_sample_key": "bad-crop", "child_sample_key": "bad-crop-aug",
+         "relation_type": "augment"},
+    ])
+
+    # 1) groups endpoint returns the conflict with both disagreeing sources
+    g = client.get(f"/datasets/{ds}/groups").json()
+    assert len(g["conflicts"]) == 1, g["conflicts"]
+    c = g["conflicts"][0]
+    assert c["declared_source_id"] != c["inherited_source_id"]
+    assert c["parent_sample_id"] != c["child_sample_id"]
+
+    # 2) conflicted identities are conservatively merged into ONE group
+    merged = [gr for gr in g["groups"]
+              if "subject:ann" in gr["source_keys"] and "subject:ben" in gr["source_keys"]]
+    assert len(merged) == 1
+    keys = {m["sample_key"] for m in merged[0]["members"]}
+    assert {"ann-1", "ann-2", "ben-1", "bad-crop", "bad-crop-aug"} <= keys
+
+    # 3) split + independent verification: the whole merged component,
+    #    including the chain grandchild, stays on one side
+    split = _gen(ds, ratio=0.5)
+    sides, _ = _side_map(split["split_id"])
+    assert len({sides[k] for k in
+                ("ann-1", "ann-2", "ben-1", "bad-crop", "bad-crop-aug")}) == 1
+    ver = client.post(f"/splits/{split['split_id']}/verify").json()
+    assert ver["passed"], ver["group_isolation"]
+
+
 def test_verifier_catches_deliberate_isolation_breach():
     """Independent verifier must flag a hand-broken assignment."""
     from app.verify import verify_split
