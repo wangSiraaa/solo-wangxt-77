@@ -202,3 +202,69 @@ def plan_split(gdf: pd.DataFrame, target_eval_ratio: float, boundary: str,
         },
     }
     return SplitResult(assignments=assignments, report=report)
+
+
+def plan_keep_eval(pool: pd.DataFrame, eval_df: pd.DataFrame,
+                   target_eval_ratio: float, boundary: str, seed: int) -> SplitResult:
+    """Frozen-eval rebalancing: the eval side is copied VERBATIM from a locked
+    split; the train side is every eligible sample (not frozen-eval, not
+    quarantined). The per-class ratio is then determined by availability, not
+    searched — wherever it misses the target we state exactly what would be
+    needed and why it cannot be had."""
+    boundary_ts = _to_utc(boundary)
+    pool = pool.copy()
+    eval_df = eval_df.copy()
+    if len(pool):
+        pool["captured_at"] = pool["captured_at"].map(_to_utc)
+    if len(eval_df):
+        eval_df["captured_at"] = eval_df["captured_at"].map(_to_utc)
+
+    assignments = {int(i): "eval" for i in eval_df["id"]}
+    assignments.update({int(i): "train" for i in pool["id"]})
+
+    labels = sorted(set(eval_df["label"]) | set(pool["label"]))
+    per_class, explanations = {}, []
+    dev_sum = 0.0
+    for lab in labels:
+        E = int((eval_df["label"] == lab).sum())
+        T = int((pool["label"] == lab).sum())
+        share = E / (E + T) if (E + T) else 0.0
+        dev_sum += abs(share - target_eval_ratio)
+        per_class[lab] = {"total": E + T, "eval": E, "train": T,
+                          "achieved_eval_share": round(share, 4)}
+        gap = target_eval_ratio - share
+        if not (E + T) or abs(gap) <= 0.05:
+            continue
+        needed_T = E * (1 - target_eval_ratio) / target_eval_ratio
+        if share > target_eval_ratio:
+            explanations.append(
+                f"类别 '{lab}': 冻结评测 {E} 条、可用训练 {T} 条 → 评测占比 {share:.0%}，"
+                f"高于目标 {target_eval_ratio:.0%}。达到目标需训练侧约 {needed_T:.0f} 条"
+                f"（缺口 {max(0.0, needed_T - T):.0f} 条）；评测集已冻结不可缩减，"
+                f"训练侧可用样本受隔离与证据约束无法补足，比例目标无法达到。")
+        else:
+            excess_T = T - needed_T
+            explanations.append(
+                f"类别 '{lab}': 冻结评测 {E} 条、可用训练 {T} 条 → 评测占比 {share:.0%}，"
+                f"低于目标 {target_eval_ratio:.0%}。评测集已冻结不可增补；"
+                f"若靠削减训练侧达标需整组移除约 {max(0.0, excess_T):.0f} 条样本，"
+                f"将推高其他类别偏差并浪费数据，故不执行，比例目标无法达到。")
+
+    time_viol_train = int((pool["captured_at"] >= boundary_ts).sum()) if len(pool) else 0
+    time_viol_eval = int((eval_df["captured_at"] < boundary_ts).sum()) if len(eval_df) else 0
+    n = max(len(labels), 1)
+    report = {
+        "seed": seed,
+        "target_eval_ratio": target_eval_ratio,
+        "time_boundary": boundary,
+        "n_groups": int(pool["group_id"].nunique()) if len(pool) else 0,
+        "n_straddling_groups": 0,
+        "cost": {"time_violations": time_viol_train,
+                 "inherited_eval_time_violations": time_viol_eval,
+                 "mean_abs_ratio_deviation": round(dev_sum / n, 4),
+                 "per_class_eval_share": {k: v["achieved_eval_share"]
+                                          for k, v in per_class.items()}},
+        "explanations": explanations,
+        "per_class": per_class,
+    }
+    return SplitResult(assignments=assignments, report=report)

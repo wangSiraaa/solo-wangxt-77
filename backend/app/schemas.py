@@ -25,7 +25,27 @@ class SplitRequest(BaseModel):
     seed: int = 42
     time_weight: float = 10.0
     ratio_weight: float = 1.0
+    # Frozen-eval mode: keep this locked split's eval side verbatim and
+    # rebalance the training portion around it.
+    keep_eval_from_split_id: int | None = None
 
 
 class ConfirmRequest(BaseModel):
     confirmed_by: str
+
+
+class MergeIn(BaseModel):
+    source_a_key: str
+    source_b_key: str
+
+
+class ExperimentIn(BaseModel):
+    name: str
+    split_version_id: int | None = None          # locked split to snapshot from
+    manifest_snapshot: dict[str, str] | None = None  # or an imported manifest
+    manifest_hash: str | None = None
+
+
+class LiftRequest(BaseModel):
+    lifted_by: str
+    reason: str = ""

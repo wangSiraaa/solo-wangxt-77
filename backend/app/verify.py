@@ -10,7 +10,8 @@ from collections import defaultdict, deque
 import pandas as pd
 
 
-def _independent_groups(samples: pd.DataFrame, relations: pd.DataFrame) -> dict[int, int]:
+def _independent_groups(samples: pd.DataFrame, relations: pd.DataFrame,
+                        merges: list[tuple[int, int]] | None = None) -> dict[int, int]:
     """sample_id -> group index, built by explicit graph traversal."""
     adj: dict[int, set[int]] = defaultdict(set)
     declared: dict[int, int] = {}
@@ -21,11 +22,25 @@ def _independent_groups(samples: pd.DataFrame, relations: pd.DataFrame) -> dict[
         adj[rel.parent_sample_id].add(rel.child_sample_id)
         adj[rel.child_sample_id].add(rel.parent_sample_id)
 
-    # Merge declared-source buckets into the traversal: samples sharing a
-    # declared source are connected through a virtual hub.
+    # Merge declared-source buckets; subject merges ("same person") chain
+    # buckets together through a canonical source id.
+    canon: dict[int, int] = {}
+
+    def find_s(s: int) -> int:
+        canon.setdefault(s, s)
+        while canon[s] != s:
+            canon[s] = canon[canon[s]]
+            s = canon[s]
+        return s
+
+    for a, b in (merges or []):
+        ra, rb = find_s(a), find_s(b)
+        if ra != rb:
+            canon[max(ra, rb)] = min(ra, rb)
+
     by_source: dict[int, list[int]] = defaultdict(list)
     for sid, src in declared.items():
-        by_source[src].append(sid)
+        by_source[find_s(src)].append(sid)
 
     group_of: dict[int, int] = {}
     gid = 0
@@ -39,7 +54,7 @@ def _independent_groups(samples: pd.DataFrame, relations: pd.DataFrame) -> dict[
             cur = queue.popleft()
             neighbors = set(adj.get(cur, ()))
             if cur in declared:
-                neighbors.update(by_source[declared[cur]])
+                neighbors.update(by_source[find_s(declared[cur])])
             for nxt in neighbors:
                 if nxt in unseen:
                     unseen.discard(nxt)
@@ -56,22 +71,28 @@ def _to_utc(ts_like) -> pd.Timestamp:
 
 def verify_split(samples: pd.DataFrame, relations: pd.DataFrame,
                  assignments: dict[int, str], boundary: str,
-                 target_eval_ratio: float) -> dict:
-    group_of = _independent_groups(samples, relations)
+                 target_eval_ratio: float,
+                 merges: list[tuple[int, int]] | None = None) -> dict:
+    group_of = _independent_groups(samples, relations, merges)
     boundary_ts = _to_utc(boundary)
 
-    # 1) Group isolation: every group's samples must sit on exactly one side.
+    # 1) Group isolation: every group's ASSIGNED samples must sit on one side.
+    #    Unassigned samples (e.g. quarantined) are reported, not judged.
     sides_by_group: dict[int, set] = defaultdict(set)
     for sid, grp in group_of.items():
-        sides_by_group[grp].add(assignments[sid])
+        side = assignments.get(sid)
+        if side is not None:
+            sides_by_group[grp].add(side)
     isolation_violations = [
         {"group_id": g, "sides": sorted(s)} for g, s in sides_by_group.items() if len(s) > 1
     ]
 
-    # 2) Time condition.
+    # 2) Time condition (assigned samples only).
     time_violations = []
     for row in samples.itertuples():
-        side = assignments[row.id]
+        side = assignments.get(row.id)
+        if side is None:
+            continue
         ts = _to_utc(row.captured_at)
         if side == "eval" and ts < boundary_ts:
             time_violations.append({"sample_id": row.id, "side": side,
@@ -80,11 +101,13 @@ def verify_split(samples: pd.DataFrame, relations: pd.DataFrame,
             time_violations.append({"sample_id": row.id, "side": side,
                                     "captured_at": str(ts), "reason": "train sample after boundary"})
 
-    # 3) Class ratio recomputed from scratch.
+    # 3) Class ratio recomputed from scratch (assigned samples only).
     df = samples.copy()
     df["side"] = df["id"].map(assignments)
+    judged = df.dropna(subset=["side"])
+    n_unassigned = int(len(df) - len(judged))
     ratio_check = {}
-    for lab, g in df.groupby("label"):
+    for lab, g in judged.groupby("label"):
         share = float((g["side"] == "eval").mean())
         ratio_check[lab] = {"achieved_eval_share": round(share, 4),
                             "target": target_eval_ratio,
@@ -98,14 +121,14 @@ def verify_split(samples: pd.DataFrame, relations: pd.DataFrame,
     for row in samples.itertuples():
         if row.kind != "raw" and pd.isna(row.source_id) and row.id not in related:
             orphans.append({"sample_id": row.id, "kind": row.kind,
-                            "side": assignments[row.id],
+                            "side": assignments.get(row.id, "unassigned"),
                             "risk": "derived artifact with unknown source; may share identity "
                                     "with a subject on the opposite side"})
     #    b) Duplicate content across sides: content_hash is only auxiliary
     #       evidence, so this is a WARNING, not an isolation violation.
     dup_warnings = []
     if "content_hash" in df:
-        hashed = df.dropna(subset=["content_hash"])
+        hashed = df.dropna(subset=["content_hash", "side"])
         for ch, g in hashed.groupby("content_hash"):
             sides = set(g["side"])
             if len(sides) > 1:
@@ -120,6 +143,7 @@ def verify_split(samples: pd.DataFrame, relations: pd.DataFrame,
     passed = not isolation_violations
     return {
         "passed": passed,
+        "n_unassigned": n_unassigned,
         "group_isolation": {
             "ok": not isolation_violations,
             "n_groups_checked": len(sides_by_group),

@@ -69,3 +69,63 @@ CREATE TABLE audit_events (
     detail           TEXT,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- 证据事件：仅追加，支撑按证据版本重放污染判断
+CREATE TABLE evidence_events (
+    id          SERIAL PRIMARY KEY,
+    dataset_id  INT NOT NULL REFERENCES datasets(id),
+    version     INT NOT NULL,
+    event_type  VARCHAR(30) NOT NULL,  -- relation_added/revoked, subjects_merged/unmerged
+    payload     JSONB NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (dataset_id, version)
+);
+
+ALTER TABLE source_relations
+    ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'active',
+    ADD COLUMN evidence_version INT;
+
+-- 主体合并（"确认同一人"，可撤销）
+CREATE TABLE subject_merges (
+    id          SERIAL PRIMARY KEY,
+    dataset_id  INT NOT NULL REFERENCES datasets(id),
+    source_a_id INT NOT NULL REFERENCES sources(id),
+    source_b_id INT NOT NULL REFERENCES sources(id),
+    status      VARCHAR(20) NOT NULL DEFAULT 'active',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 隔离候选：疑似污染的训练/未分配样本；解除不会自动加回旧实验
+CREATE TABLE quarantine_candidates (
+    id                      SERIAL PRIMARY KEY,
+    dataset_id              INT NOT NULL REFERENCES datasets(id),
+    sample_id               INT NOT NULL REFERENCES samples(id),
+    reason                  TEXT NOT NULL,
+    evidence_version        INT NOT NULL,
+    status                  VARCHAR(20) NOT NULL DEFAULT 'quarantined',
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    lifted_at               TIMESTAMPTZ,
+    lifted_evidence_version INT,
+    lifted_manually         BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+-- 已完成实验：保留当时清单快照，受影响范围以 impact 记录标识
+CREATE TABLE experiments (
+    id                SERIAL PRIMARY KEY,
+    dataset_id        INT NOT NULL REFERENCES datasets(id),
+    name              VARCHAR(200) NOT NULL,
+    split_version_id  INT REFERENCES split_versions(id),
+    manifest_hash     VARCHAR(64),
+    manifest_snapshot JSONB,        -- {sample_id: side}，清单缺失时为 NULL
+    status            VARCHAR(20) NOT NULL DEFAULT 'completed',
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE experiment_impacts (
+    id                   SERIAL PRIMARY KEY,
+    experiment_id        INT NOT NULL REFERENCES experiments(id),
+    evidence_version     INT NOT NULL,
+    polluted_sample_ids  JSONB NOT NULL,
+    summary              TEXT NOT NULL,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);

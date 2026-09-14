@@ -40,9 +40,12 @@ class GroupTable:
     orphans: list[int] = field(default_factory=list)      # sample_ids w/o source identity
 
 
-def build_groups(samples: pd.DataFrame, relations: pd.DataFrame) -> GroupTable:
+def build_groups(samples: pd.DataFrame, relations: pd.DataFrame,
+                 merges: list[tuple[int, int]] | None = None) -> GroupTable:
     """samples columns: id, source_id, kind, label, captured_at, content_hash
     relations columns: parent_sample_id, child_sample_id, relation_type
+    merges: active (source_a_id, source_b_id) pairs — subjects confirmed to be
+            the same person; they share identity while the merge is active.
     """
     uf = UnionFind()
     for sid in samples["id"]:
@@ -50,42 +53,47 @@ def build_groups(samples: pd.DataFrame, relations: pd.DataFrame) -> GroupTable:
     for sid in samples["source_id"].dropna():
         uf.find(f"source:{int(sid)}")
 
-    # Phase 1: anchor samples to their DECLARED sources only. Afterwards each
-    # component holds at most one source node — remember it as the anchor.
+    # Phase 1: anchor samples to their DECLARED sources only, then apply
+    # subject merges. Afterwards remember each component's anchor SET (a
+    # merged component legitimately holds several sources).
     for row in samples.itertuples():
         if pd.notna(row.source_id):
             uf.union(f"sample:{row.id}", f"source:{int(row.source_id)}")
-    anchor_of: dict[str, int] = {}
+    for a, b in (merges or []):
+        uf.union(f"source:{a}", f"source:{b}")
+    anchor_of: dict[str, set[int]] = {}
     for row in samples.itertuples():
         if pd.notna(row.source_id):
-            anchor_of[uf.find(f"sample:{row.id}")] = int(row.source_id)
+            anchor_of.setdefault(uf.find(f"sample:{row.id}"), set()).add(int(row.source_id))
 
     # Phase 2: inherit identity along relation edges. BEFORE merging, check
-    # whether the edge joins two components anchored to DIFFERENT declared
-    # sources — that is a declared-vs-inherited conflict. Detecting it here,
-    # pre-merge, is the only reliable point: after the union both sides share
-    # one root and the disagreement is invisible. We still merge (conservative:
-    # the whole component stays on one side), but the conflict is reported.
+    # whether the edge joins two components anchored to DISJOINT declared
+    # source sets — that is a declared-vs-inherited conflict. Detecting it
+    # here, pre-merge, is the only reliable point: after the union both sides
+    # share one root and the disagreement is invisible. We still merge
+    # (conservative: the whole component stays on one side), but report it.
     conflicts = []
     for rel in relations.itertuples():
         p, c = f"sample:{rel.parent_sample_id}", f"sample:{rel.child_sample_id}"
         rp, rc = uf.find(p), uf.find(c)
         if rp == rc:
             continue
-        sp, sc = anchor_of.get(rp), anchor_of.get(rc)
-        if sp is not None and sc is not None and sp != sc:
+        sp, sc = anchor_of.get(rp, set()), anchor_of.get(rc, set())
+        if sp and sc and sp.isdisjoint(sc):
             conflicts.append({
                 "parent_sample_id": int(rel.parent_sample_id),
                 "child_sample_id": int(rel.child_sample_id),
-                "declared_source_id": sc,
-                "inherited_source_id": sp,
+                "declared_source_id": min(sc),
+                "inherited_source_id": min(sp),
+                "declared_source_ids": sorted(sc),
+                "inherited_source_ids": sorted(sp),
                 "reason": "declared source conflicts with identity inherited "
                           "via derivation chain",
             })
         uf.union(p, c)
-        merged = sp if sp is not None else sc
-        if merged is not None:
-            anchor_of[uf.find(p)] = merged
+        united = sp | sc
+        if united:
+            anchor_of[uf.find(p)] = united
 
     # Assign stable group ids.
     roots = sorted({uf.find(f"sample:{sid}") for sid in samples["id"]})

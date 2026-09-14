@@ -20,6 +20,23 @@
 5. **确认即锁定**：用户确认后计算并锁定 `manifest_hash`（样本归属+参数+种子的
    SHA-256）。任何修改通过 `revise` 形成新版本，旧版本哈希永久保留。
 
+## 冻结评测集保护（v2）
+
+评测集被多个实验引用后不再重新随机划分：
+
+- **证据版本化**：派生关系与"两个主体是同一人"的合并都是可撤销的证据，全部记入
+  仅追加的 `evidence_events`（每个数据集单调递增版本号）。撤销也是事件，历史不改写。
+- **增量关系检查**：新样本入库、新关系登记、合并/撤销时自动重算——与冻结评测集
+  同组的训练样本进入**隔离候选**（`quarantine_candidates`），新拆分方案自动排除。
+- **实验影响标识**：已完成实验保留当时清单快照（`manifest_snapshot`），新证据造成的
+  污染以 `experiment_impacts` 追加记录标识受影响范围，**不删除记录假装从未发生**。
+- **按证据版本重放**：`GET /experiments/{id}/contamination?evidence_version=N`
+  用同一清单 + N 版证据重算污染判断，结果确定，可审计任意历史时点。
+- **隔离解除不加回旧实验**：证据被推翻后隔离自动解除（或人工解除），但旧实验清单
+  不可变；如需重新使用该样本，只能生成新拆分方案。
+- **保留评测集再平衡**：`splits:generate` 传 `keep_eval_from_split_id` 即复制锁定
+  版本的评测侧、仅重排训练侧；比例目标无法达到时逐类说明缺口与原因。
+
 ## 快速开始
 
 ```bash
@@ -52,6 +69,15 @@ GET  /splits/{id}                       方案详情与清单
 POST /splits/{id}/verify                独立验证（隔离/时间/比例/未知关系风险）
 POST /splits/{id}/confirm               确认并锁定 manifest_hash
 POST /splits/{id}/revise                修改 → 生成新版本，旧版本转为 superseded
+POST /relations/{id}/revoke             推翻派生关系证据（触发增量复查）
+POST /datasets/{id}/merges              确认两个主体为同一人（可撤销）
+POST /merges/{id}/revoke                撤销主体合并
+GET  /datasets/{id}/evidence            证据事件日志（版本化）
+POST /datasets/{id}/experiments         登记已完成实验（快照当时清单）
+GET  /experiments/{id}                  实验详情 + 影响历史
+GET  /experiments/{id}/contamination    按证据版本重放污染判断
+GET  /datasets/{id}/quarantine          隔离候选列表
+POST /quarantine/{id}/lift              人工解除隔离（不加回旧实验）
 ```
 
 ## 独立验证（`backend/app/verify.py`）
